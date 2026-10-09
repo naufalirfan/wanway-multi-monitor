@@ -1,39 +1,12 @@
-// WanWay Multi-Account Monitor — backend proxy Elysia.
-// Akun tersimpan terenkripsi AES-256-GCM (key: env APP_ENC_KEY).
-// Token IOPGPS di-cache 1.5 jam per akun (masa berlaku 2 jam, anti-brute auth).
+// WanWay Multi-Account Monitor — backend proxy Elysia (stateless).
+// Kredensial akun disimpan di browser client & dikirim per-request — server tidak
+// menyimpan secret (Vercel serverless: FS read-only, /tmp ephemeral).
+// Token IOPGPS di-cache 1.5 jam per appid (masa berlaku 2 jam).
 import { Elysia } from "elysia";
-import { createHash, createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
-import { extname, join, dirname } from "node:path";
-
-// Vercel: FS read-only kecuali /tmp. DB_FILE di-set ke /tmp/accounts.json saat deploy.
-const DB = process.env.DB_FILE ?? (process.env.VERCEL ? "/tmp/accounts.json" : "./data/accounts.json");
-const ENC_KEY = createHash("sha256").update(process.env.APP_ENC_KEY ?? "wanway-demo-insecure-key").digest();
-const OPTS = { algorithm: "aes-256-gcm", iv: "iv", tag: "tag", data: "data" };
-
-// --- storage (JSON file, Vercel pakai /tmp) ---
-async function loadAccounts(): Promise<Record<string, unknown>[]> {
-  if (!existsSync(DB)) return [];
-  return JSON.parse(await readFile(DB, "utf8"));
-}
-async function saveAccounts(accounts: unknown[]): Promise<void> {
-  await mkdir(dirname(DB), { recursive: true });
-  await writeFile(DB, JSON.stringify(accounts, null, 2));
-}
-
-function enc(plain: string): string {
-  const iv = randomBytes(12);
-  const c = createCipheriv(OPTS.algorithm, ENC_KEY, iv) as import("node:crypto").CipherGCM;
-  const data = Buffer.concat([c.update(plain, "utf8"), c.final()]);
-  return JSON.stringify({ [OPTS.iv]: iv.toString("base64"), [OPTS.tag]: c.getAuthTag().toString("base64"), [OPTS.data]: data.toString("base64") });
-}
-function dec(payload: string): string {
-  const p = JSON.parse(payload);
-  const d = createDecipheriv(OPTS.algorithm, ENC_KEY, Buffer.from(p[OPTS.iv], "base64")) as import("node:crypto").DecipherGCM;
-  d.setAuthTag(Buffer.from(p[OPTS.tag], "base64"));
-  return Buffer.concat([d.update(Buffer.from(p[OPTS.data], "base64")), d.final()]).toString("utf8");
-}
+import { extname, join } from "node:path";
 
 // --- IOPGPS client ---
 const IOP = "https://open.iopgps.com";
@@ -65,35 +38,18 @@ async function iopGet<T>(token: string, path: string, qs: Record<string, string 
   return j;
 }
 
+type Cred = { appid: string; secret: string; name?: string };
+
 // --- routes ---
 const app = new Elysia()
   .get("/api/health", () => ({ ok: true }))
-  .get("/api/accounts", async () => {
-    const accounts = await loadAccounts();
-    return accounts.map((a: any) => ({ appid: a.appid, name: a.name, createdAt: a.createdAt }));
-  })
-  .post("/api/accounts", async ({ body }) => {
-    const { appid, secret, name } = body as { appid: string; secret: string; name?: string };
-    if (!appid || !secret) return { error: "appid dan secret wajib diisi" };
-    const accounts = await loadAccounts();
-    if (accounts.some((a: any) => a.appid === appid)) return { error: `Akun ${appid} sudah ada` };
-    accounts.push({ appid, name: name ?? appid, secret: enc(secret), createdAt: Date.now() });
-    await saveAccounts(accounts);
-    return { ok: true };
-  })
-  .delete("/api/accounts/:appid", async ({ params }) => {
-    const accounts = await loadAccounts();
-    await saveAccounts(accounts.filter((a: any) => a.appid !== params.appid));
-    tokenCache.delete(params.appid);
-    return { ok: true };
-  })
-  .get("/api/vehicles", async () => {
-    const accounts = await loadAccounts();
+  .post("/api/vehicles", async ({ body }) => {
+    const accounts = ((body as { accounts?: Cred[] })?.accounts ?? []).filter((a) => a?.appid && a?.secret);
     if (accounts.length === 0) return { vehicles: [], accounts: 0 };
     const out = [];
-    for (const a of accounts as any[]) {
+    for (const a of accounts) {
       try {
-        const token = await getToken(a.appid, dec(a.secret));
+        const token = await getToken(a.appid, a.secret);
         const list = await iopGet<{ data: { imei: string; deviceName?: string }[] }>(token, "/api/device", { currentPage: 1, pageSize: 100 });
         for (const d of list.data) {
           const s = await iopGet<{ data: any[] }>(token, "/api/device/status", { imei: d.imei }).catch(() => ({ data: [] }));
@@ -147,7 +103,6 @@ app.get("*", async ({ request, set }) => {
   return new Response(await readFile(file));
 });
 
-console.log("wanway monitor starting on", process.env.PORT ?? 3000);
 if (!process.env.VERCEL) {
   app.listen(process.env.PORT ?? 3000);
 }

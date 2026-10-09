@@ -7,34 +7,45 @@ type Vehicle = {
   status: string; vin: string; licenseNumber: string;
   lng: number | null; lat: number | null; address: string; gpsTime: number | null; error?: boolean;
 };
-type Account = { appid: string; name: string; createdAt: number };
+type Account = { appid: string; secret: string; name?: string };
+
+const LS_KEY = "wanway_accounts";
+
+function loadAccounts(): Account[] {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) ?? "[]"); } catch { return []; }
+}
+function saveAccounts(a: Account[]) {
+  localStorage.setItem(LS_KEY, JSON.stringify(a));
+}
 
 function App() {
-  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>(() => loadAccounts());
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [status, setStatus] = useState("memuat…");
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
+  const accRef = useRef<Account[]>(accounts);
+  accRef.current = accounts;
 
   useEffect(() => {
     const map = L.map("map").setView([-7.25, 112.75], 11);
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(map);
     layerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
-    refreshAccounts();
-    refreshVehicles();
-    const t = setInterval(refreshVehicles, 30000);
+    const t = setInterval(() => refreshVehicles(accRef.current), 30000);
     return () => clearInterval(t);
   }, []);
 
-  async function refreshAccounts() {
-    const r = await fetch("/api/accounts");
-    const j = await r.json();
-    setAccounts(j);
-  }
-  async function refreshVehicles() {
+  useEffect(() => { refreshVehicles(accounts); }, [accounts]);
+
+  async function refreshVehicles(accs: Account[]) {
+    if (accs.length === 0) { setVehicles([]); setStatus("belum ada akun — tambahkan di panel kiri"); renderMarkers([]); return; }
     try {
-      const r = await fetch("/api/vehicles");
+      const r = await fetch("/api/vehicles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accounts: accs }),
+      });
       const j = await r.json();
       setVehicles(j.vehicles ?? []);
       setStatus(`diperbarui ${new Date().toLocaleTimeString("id-ID")} · ${j.vehicles?.length ?? 0} kendaraan · ${j.accounts ?? 0} akun`);
@@ -56,22 +67,22 @@ function App() {
     }
   }
 
-  async function addAccount(e: React.FormEvent) {
+  function addAccount(e: React.FormEvent) {
     e.preventDefault();
     const form = e.target as HTMLFormElement;
     const appid = (form.querySelector("#f-appid") as HTMLInputElement).value.trim();
     const secret = (form.querySelector("#f-secret") as HTMLInputElement).value.trim();
-    const r = await fetch("/api/accounts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ appid, secret }) });
-    const j = await r.json();
-    if (j.error) { setStatus(j.error); return; }
+    if (!appid || !secret) return;
+    if (accounts.some(a => a.appid === appid)) { setStatus(`akun ${appid} sudah ada`); return; }
+    const next = [...accounts, { appid, secret }];
+    saveAccounts(next);
+    setAccounts(next);
     form.reset();
-    await refreshAccounts();
-    await refreshVehicles();
   }
-  async function removeAccount(appid: string) {
-    await fetch(`/api/accounts/${appid}`, { method: "DELETE" });
-    await refreshAccounts();
-    await refreshVehicles();
+  function removeAccount(appid: string) {
+    const next = accounts.filter(a => a.appid !== appid);
+    saveAccounts(next);
+    setAccounts(next);
   }
 
   const grouped = new Map<string, Vehicle[]>();
@@ -90,10 +101,12 @@ function App() {
           <input id="f-secret" type="password" placeholder="Secret Key (Open API)" required />
           <button type="submit">+ Tambah Akun</button>
         </form>
+        {accounts.length === 0 && <div className="empty">Belum ada akun. AppID + Secret Key dari Open API WanWay/IOPGPS.</div>}
         {[...grouped.entries()].map(([acc, vs]) => (
           <div className="acc" key={acc}>
             <div><b>{acc}</b> <small>{vs.length} kendaraan</small>
-              {!vs.some(v => v.error) && <button className="danger" style={{ float: "right" }} onClick={() => removeAccount(acc)}>hapus</button>}
+              {!vs.some(v => v.error) && accounts.some(a => a.appid === acc) &&
+                <button className="danger" style={{ float: "right" }} onClick={() => removeAccount(acc)}>hapus</button>}
             </div>
             {vs.map(v => (
               <div className="v" key={v.imei}>
