@@ -2,41 +2,21 @@
 <html lang="id">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>WanWay Multi-Account Monitor</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content="Pantau kendaraan dari banyak akun WanWay / IOPGPS dalam satu peta." />
+    <title>WanWay Monitor — Multi-Akun IOPGPS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <style>
-      body { margin: 0; font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; }
-      #app { display: flex; height: 100vh; }
-      #sidebar { width: 340px; background: #1e293b; padding: 16px; overflow-y: auto; }
-      #map { flex: 1; }
-      h1 { font-size: 18px; margin: 0 0 12px; }
-      input { width: 100%; box-sizing: border-box; padding: 8px; margin: 4px 0; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; }
-      button { padding: 8px 12px; border-radius: 6px; border: none; cursor: pointer; background: #2563eb; color: white; }
-      button.danger { background: #dc2626; }
-      .acc { background: #0f172a; border-radius: 8px; padding: 10px; margin: 8px 0; }
-      .acc small { color: #94a3b8; }
-      .v { border-top: 1px solid #334155; padding: 6px 0; font-size: 13px; }
-      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-      .on { background: #22c55e; } .off { background: #ef4444; }
-      .err { color: #f87171; }
-      #status { font-size: 12px; color: #94a3b8; margin-top: 12px; }
-    </style>
+    <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <div id="app">
-      <div id="sidebar">
-        <h1>🚗 WanWay Monitor</h1>
-        <form id="add-form">
-          <input id="f-appid" placeholder="AppID (username login)" required />
-          <input id="f-secret" type="password" placeholder="Secret Key (Open API)" required />
-          <button type="submit">+ Tambah Akun</button>
-        </form>
-        <div id="accounts"></div>
-        <div id="status">memuat…</div>
-      </div>
-      <div id="map"></div>
-    </div>
+    <div id="app"></div>
     <script type="module" src="/main.tsx"></script>
   </body>
 </html>
