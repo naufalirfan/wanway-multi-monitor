@@ -9,7 +9,6 @@
     "start": "bun src/index.ts"
   },
   "dependencies": {
-    "@elysiajs/static": "^1.4.10",
     "elysia": "^1.1.26",
     "leaflet": "^1.9.4",
     "react": "^19.2.5",

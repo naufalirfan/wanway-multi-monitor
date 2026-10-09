@@ -2,12 +2,13 @@
 // Akun tersimpan terenkripsi AES-256-GCM (key: env APP_ENC_KEY).
 // Token IOPGPS di-cache 1.5 jam per akun (masa berlaku 2 jam, anti-brute auth).
 import { Elysia } from "elysia";
-import { staticPlugin } from "@elysiajs/static";
 import { createHash, createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { existsSync, statSync } from "node:fs";
+import { extname, join, dirname } from "node:path";
 
-const DB = process.env.DB_FILE ?? "./data/accounts.json";
+// Vercel: FS read-only kecuali /tmp. DB_FILE di-set ke /tmp/accounts.json saat deploy.
+const DB = process.env.DB_FILE ?? (process.env.VERCEL ? "/tmp/accounts.json" : "./data/accounts.json");
 const ENC_KEY = createHash("sha256").update(process.env.APP_ENC_KEY ?? "wanway-demo-insecure-key").digest();
 const OPTS = { algorithm: "aes-256-gcm", iv: "iv", tag: "tag", data: "data" };
 
@@ -17,6 +18,7 @@ async function loadAccounts(): Promise<Record<string, unknown>[]> {
   return JSON.parse(await readFile(DB, "utf8"));
 }
 async function saveAccounts(accounts: unknown[]): Promise<void> {
+  await mkdir(dirname(DB), { recursive: true });
   await writeFile(DB, JSON.stringify(accounts, null, 2));
 }
 
@@ -117,12 +119,33 @@ const app = new Elysia()
     }
     return { vehicles: out, accounts: accounts.length };
   })
-  .all("/*", ({ path }) => {
-    // SPA fallback → index.html (client dist di-serve oleh staticPlugin)
-    const f = Bun.file("./dist/client/index.html");
-    return f.exists() ? new Response(f) : new Response("client belum di-build", { status: 404 });
-  })
-  .use(staticPlugin({ prefix: "/", assets: "./dist/client" }));
+// Serve built Vite client (dist/client) — API + UI satu origin.
+// ponytail: cwd di Vercel = repo root, output di dist/client. Tambah path lain bila layout berubah.
+const CLIENT_DIR = join(process.cwd(), "dist/client");
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
+};
+
+app.get("*", async ({ request, set }) => {
+  const pathname = decodeURIComponent(new URL(request.url).pathname);
+  const candidate = join(CLIENT_DIR, pathname);
+  const file = existsSync(candidate) && statSync(candidate).isFile()
+    ? candidate
+    : join(CLIENT_DIR, "index.html");
+  if (!existsSync(file)) {
+    set.status = 404;
+    return { error: { message: "Client build not found. Run `bun run build:client`." } };
+  }
+  set.headers["content-type"] = MIME[extname(file)] ?? "application/octet-stream";
+  return new Response(await readFile(file));
+});
 
 console.log("wanway monitor starting on", process.env.PORT ?? 3000);
 if (!process.env.VERCEL) {
