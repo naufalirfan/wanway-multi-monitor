@@ -284,6 +284,31 @@ button.link {
 button.link:hover { color: var(--muted); }
 
 /* --- tabs --- */
+/* segmented toggle (jenis akun) */
+.seg {
+  display: flex;
+  gap: 2px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  margin-bottom: 8px;
+}
+.seg button {
+  flex: 1;
+  padding: 5px 6px;
+  font-size: 11px;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+}
+.seg button.on { background: var(--surface); color: var(--text); }
+.seg button:not(.on):hover { color: var(--text); }
+.muted-note { padding: 14px 12px; font-size: 12px; line-height: 1.6; color: var(--muted); }
+
 .tabs { flex: none; display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--line); }
 .tabs button {
   flex: 1; padding: 9px 6px; margin-bottom: -1px;

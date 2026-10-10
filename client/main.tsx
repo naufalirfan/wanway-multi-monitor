@@ -7,8 +7,12 @@ type Vehicle = {
   status: string; vin: string; licenseNumber: string;
   lng: number | null; lat: number | null; address: string; gpsTime: number | null; error?: boolean;
 };
-type Account = { appid: string; secret: string; name?: string };
+type Account =
+  | { appid: string; secret: string; name?: string }
+  | { kind: "portal"; username: string; password: string };
 type State = "online" | "offline" | "idle";
+const isPortal = (a: Account): a is Extract<Account, { kind: "portal" }> => (a as { kind?: string }).kind === "portal";
+const accLabel = (a: Account) => (isPortal(a) ? a.username : a.appid);
 type TrackPoint = { lat: number; lng: number; t: number | null; speed: number | null; address: string };
 type Alarm = { t: number | null; type: string; content: string; lng: number | null; lat: number | null; address: string };
 type Tab = "veh" | "hist" | "alarm";
@@ -54,7 +58,7 @@ function relTime(ts: number | null): string {
   if (d < 60) return "baru saja";
   if (d < 3600) return `${Math.floor(d / 60)} mnt lalu`;
   if (d < 86400) return `${Math.floor(d / 3600)} jam lalu`;
-  return `${Math.floor(d / 86400)} hr lalu`;
+  return `${Math.floor(d / 86400)} hari lalu`;
 }
 const clock = (ts: number | null) => (ts ? new Date(ts * 1000).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" }) : "—");
 
@@ -165,6 +169,7 @@ function App() {
   const [status, setStatus] = useState("memuat…");
   const [live, setLive] = useState(false);
   const [tab, setTab] = useState<Tab>("veh");
+  const [mode, setMode] = useState<"openapi" | "portal">("openapi");
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
   const trackRef = useRef<L.LayerGroup | null>(null);
@@ -195,16 +200,24 @@ function App() {
       return;
     }
     try {
-      const r = await fetch("/api/vehicles", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accounts: accs }),
-      });
-      const j = await r.json();
-      const vs: Vehicle[] = j.vehicles ?? [];
+      const oa = accs.filter((a) => !isPortal(a));
+      const pp = accs.filter(isPortal);
+      const oaP = oa.length
+        ? fetch("/api/vehicles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accounts: oa }) }).then((r) => r.json())
+        : Promise.resolve({ vehicles: [], accounts: 0 });
+      const ppP = Promise.all(
+        pp.map((a) =>
+          fetch("/api/portal/vehicles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: a.username, password: a.password }) })
+            .then((r) => r.json())
+            .catch(() => ({ vehicles: [{ imei: `err:${a.username}`, name: `⚠ ${a.username} — jaringan gagal`, account: a.username, error: true }], accounts: 0 }))
+        )
+      );
+      const [oaJ, ppJs] = await Promise.all([oaP, ppP]);
+      const vs: Vehicle[] = [...(oaJ.vehicles ?? []), ...ppJs.flatMap((j: { vehicles?: Vehicle[] }) => j.vehicles ?? [])];
+      const nAcc = (oaJ.accounts ?? 0) + pp.length;
       setVehicles(vs);
       setLive(true);
-      setStatus(`${vs.length} kendaraan · ${j.accounts ?? 0} akun · ${new Date().toLocaleTimeString("id-ID")}`);
+      setStatus(`${vs.length} kendaraan · ${nAcc} akun · ${new Date().toLocaleTimeString("id-ID")}`);
       renderMarkers(vs, fit);
     } catch {
       setLive(false);
@@ -238,18 +251,29 @@ function App() {
   function addAccount(e: FormEvent) {
     e.preventDefault();
     const form = e.target as HTMLFormElement;
+    if (mode === "portal") {
+      const username = (form.querySelector("#f-user") as HTMLInputElement).value.trim();
+      const password = (form.querySelector("#f-pass") as HTMLInputElement).value;
+      if (!username || !password) return;
+      if (accounts.some((a) => isPortal(a) && a.username === username)) { setStatus(`akun ${username} sudah ada`); return; }
+      const next = [...accounts, { kind: "portal" as const, username, password }];
+      saveAccounts(next);
+      setAccounts(next);
+      form.reset();
+      return;
+    }
     const appid = (form.querySelector("#f-appid") as HTMLInputElement).value.trim();
     const secret = (form.querySelector("#f-secret") as HTMLInputElement).value.trim();
     if (!appid || !secret) return;
-    if (accounts.some((a) => a.appid === appid)) { setStatus(`akun ${appid} sudah ada`); return; }
+    if (accounts.some((a) => !isPortal(a) && a.appid === appid)) { setStatus(`akun ${appid} sudah ada`); return; }
     const next = [...accounts, { appid, secret }];
     saveAccounts(next);
     setAccounts(next);
     form.reset();
   }
 
-  function removeAccount(appid: string) {
-    const next = accounts.filter((a) => a.appid !== appid);
+  function removeAccount(key: string) {
+    const next = accounts.filter((a) => accLabel(a) !== key);
     saveAccounts(next);
     setAccounts(next);
   }
@@ -264,7 +288,8 @@ function App() {
     (a, v) => { a[stateOf(v)]++; return a; },
     { online: 0, offline: 0, idle: 0 } as Record<State, number>
   );
-  const tracked = vehicles.filter((v) => !v.error);
+  const portalAccs = accounts.filter(isPortal).map((a) => a.username);
+  const tracked = vehicles.filter((v) => !v.error && !portalAccs.includes(v.account));
 
   return (
     <div className="shell">
@@ -289,10 +314,25 @@ function App() {
         </header>
 
         <form className="add" onSubmit={addAccount} id="add-form">
-          <label htmlFor="f-appid">AppID</label>
-          <input id="f-appid" placeholder="appid Open API" autoComplete="off" required />
-          <label htmlFor="f-secret">Secret Key</label>
-          <input id="f-secret" type="password" placeholder="login key Open API" autoComplete="off" required />
+          <div className="seg" role="tablist" aria-label="Jenis akun">
+            <button type="button" className={mode === "openapi" ? "on" : ""} onClick={() => setMode("openapi")}>Open API</button>
+            <button type="button" className={mode === "portal" ? "on" : ""} onClick={() => setMode("portal")}>Akun app</button>
+          </div>
+          {mode === "openapi" ? (
+            <>
+              <label htmlFor="f-appid">AppID</label>
+              <input id="f-appid" placeholder="appid Open API" autoComplete="off" required />
+              <label htmlFor="f-secret">Secret Key</label>
+              <input id="f-secret" type="password" placeholder="login key Open API" autoComplete="off" required />
+            </>
+          ) : (
+            <>
+              <label htmlFor="f-user">Username</label>
+              <input id="f-user" placeholder="akun WanWay Track" autoComplete="off" required />
+              <label htmlFor="f-pass">Password</label>
+              <input id="f-pass" type="password" placeholder="password akun" autoComplete="off" required />
+            </>
+          )}
           <button type="submit">Tambah akun</button>
         </form>
 
@@ -314,8 +354,8 @@ function App() {
           {tab === "veh" && accounts.length === 0 && (
             <div className="empty">
               <b>Belum ada akun.</b><br />
-              Masukkan <b>AppID</b> dan <b>Secret Key</b> dari Open API WanWay/IOPGPS.
-              Kunci ini tidak ada di aplikasi ponsel — harus diminta ke WanWay.
+              Tambahkan lewat <b>Open API</b> (AppID + Secret Key, diminta ke WanWay)
+              atau <b>Akun app</b> (username + password akun WanWay Track Anda).
             </div>
           )}
           {tab === "veh" && [...grouped.entries()].map(([acc, vs]) => (
@@ -323,7 +363,7 @@ function App() {
               <div className="acc-head">
                 <b>{acc}</b>
                 <small>{vs.length}</small>
-                {accounts.some((a) => a.appid === acc) && (
+                {accounts.some((a) => accLabel(a) === acc) && (
                   <button type="button" onClick={() => removeAccount(acc)}>hapus</button>
                 )}
               </div>
@@ -371,10 +411,13 @@ function TrackPanel({ accounts, tracked, trackRef, mapRef, layerRef }: {
 
   useEffect(() => { if (!imei && tracked[0]) setImei(tracked[0].imei); }, [tracked, imei]);
 
+  if (tracked.length === 0)
+    return <p className="muted-note">Riwayat memerlukan akun <b>Open API</b>. Akun app hanya tampil di tab Kendaraan.</p>;
+
   async function run() {
     const v = tracked.find((x) => x.imei === imei);
-    const acc = accounts.find((a) => a.appid === v?.account);
-    if (!v || !acc) return setMsg("pilih kendaraan");
+    const acc = accounts.find((a) => !isPortal(a) && a.appid === v?.account);
+    if (!v || !acc || isPortal(acc)) return setMsg("pilih kendaraan");
     setMsg("memuat riwayat…");
     const end = Math.floor(Date.now() / 1000);
     const start = end - hours * 3600;
@@ -454,10 +497,13 @@ function AlarmPanel({ accounts, tracked }: { accounts: Account[]; tracked: Vehic
 
   useEffect(() => { if (!imei && tracked[0]) setImei(tracked[0].imei); }, [tracked, imei]);
 
+  if (tracked.length === 0)
+    return <p className="muted-note">Alarm memerlukan akun <b>Open API</b>. Akun app hanya tampil di tab Kendaraan.</p>;
+
   async function run() {
     const v = tracked.find((x) => x.imei === imei);
-    const acc = accounts.find((a) => a.appid === v?.account);
-    if (!v || !acc) return setMsg("pilih kendaraan");
+    const acc = accounts.find((a) => !isPortal(a) && a.appid === v?.account);
+    if (!v || !acc || isPortal(acc)) return setMsg("pilih kendaraan");
     setMsg("memuat alarm…");
     const end = Math.floor(Date.now() / 1000);
     const start = end - days * 86400;

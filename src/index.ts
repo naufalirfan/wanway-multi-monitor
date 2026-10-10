@@ -3,7 +3,7 @@
 // menyimpan secret (Vercel serverless: FS read-only, /tmp ephemeral).
 // Token IOPGPS di-cache 1.5 jam per appid (masa berlaku 2 jam).
 import { Elysia } from "elysia";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { extname, join } from "node:path";
@@ -64,6 +64,103 @@ const normAlarm = (a: Record<string, unknown>) => ({
   address: String(a.address ?? ""),
 });
 
+// --- WanWay portal client (login user+pass) ---
+// Portal web www.wanwaygps.com: POST /login → accessToken → /rest/device/list.
+// Password dikirim sebagai md5(pass)+md5(nonce10), header sign md5(md5(md5(secret)+appId)+ts).
+// Diambil dari bundle login portal (tidak didokumentasikan — bisa berubah sewaktu-waktu).
+const PORTAL = "https://www.wanwaygps.com";
+const PORTAL_APP_ID = "19ee34fd3c24e7ca";
+const PORTAL_SECRET_KEY = "4b866ab922b64af4a46cf8e8f7836d4c";
+
+function deepFind(o: unknown, key: string): unknown {
+  if (!o || typeof o !== "object") return undefined;
+  const rec = o as Record<string, unknown>;
+  if (rec[key] !== undefined && rec[key] !== null) return rec[key];
+  for (const v of Object.values(rec)) {
+    const r = deepFind(v, key);
+    if (r !== undefined) return r;
+  }
+  return undefined;
+}
+
+type PortalSession = { token: string; accountId: number; exp: number };
+const portalCache = new Map<string, PortalSession>(); // username -> session
+
+async function portalLogin(username: string, password: string): Promise<PortalSession> {
+  const hit = portalCache.get(username);
+  if (hit && hit.exp > Date.now()) return hit;
+  const ts = Date.now().toString();
+  const nonce = randomBytes(5).toString("hex");
+  const sign = md5(md5(md5(PORTAL_SECRET_KEY) + PORTAL_APP_ID) + ts);
+  const res = await fetch(`${PORTAL}/login?v=${Math.floor(Date.now() / 1000)}&lang=en&source=25`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      appId: PORTAL_APP_ID,
+      secretKey: PORTAL_SECRET_KEY,
+      timestamp: ts,
+      sign,
+      serviceName: "gps-web",
+      lang: "en",
+      isDev: "0",
+      localVersion: "",
+    },
+    body: new URLSearchParams({
+      username,
+      password: md5(password) + md5(nonce),
+      loginType: "ADMIN",
+      rememberMe: "false",
+      domain: "www.wanwaygps.com",
+    }).toString(),
+  });
+  const j = (await res.json()) as Record<string, unknown>;
+  // Token dikirim via Set-Cookie (USER_TOKEN), bukan body. accountId ada di body.
+  const setCookies: string[] = typeof (res.headers as { getSetCookie?: () => string[] }).getSetCookie === "function"
+    ? (res.headers as { getSetCookie: () => string[] }).getSetCookie()
+    : [res.headers.get("set-cookie") ?? ""];
+  const m = setCookies.join("; ").match(/USER_TOKEN=([^;]+)/);
+  const token = m?.[1] ?? (deepFind(j, "accessToken") as string | undefined);
+  if (!token) throw new Error(String(deepFind(j, "message") ?? "login gagal"));
+  let accountId = Number(deepFind(j, "accountId") ?? 0);
+  if (!accountId) {
+    const a = (await fetch(`${PORTAL}/rest/account?accessToken=${token}&v=${Date.now()}&lang=en&source=25`).then((x) => x.json()).catch(() => null)) as Record<string, unknown> | null;
+    accountId = Number(deepFind(a, "accountId") ?? deepFind(a, "id") ?? 0);
+  }
+  const sess: PortalSession = { token, accountId, exp: Date.now() + 60 * 60 * 1000 };
+  portalCache.set(username, sess);
+  return sess;
+}
+
+async function portalDevices(sess: PortalSession) {
+  const url = `${PORTAL}/rest/device/list?accountId=${sess.accountId}&needCount=true&pageSize=500&status=-1&accessToken=${sess.token}&v=${Date.now()}&lang=en&source=25&zoneId=UTC`;
+  const res = await fetch(url, { headers: { cookie: `USER_TOKEN=${sess.token}` } });
+  const j = (await res.json()) as Record<string, unknown>;
+  const list = (deepFind(j, "data") ?? []) as Record<string, any>[];
+  if (!Array.isArray(list) || list.length === 0) {
+    const msg = String(deepFind(j, "message") ?? "");
+    if (msg) throw new Error(msg);
+  }
+  return list.map((d) => {
+    const s = (d.deviceStatusBean ?? {}) as Record<string, any>;
+    const gpsMs = Number(s.gpsTime ?? 0);
+    const fresh = gpsMs > 0 && Date.now() - gpsMs < 15 * 60 * 1000;
+    return {
+      imei: String(d.imei ?? ""),
+      name: String(d.deviceName ?? d.name ?? d.imei ?? ""),
+      account: "",
+      accountName: "",
+      status: fresh ? ((Number(s.speed ?? 0) > 0 || s.accStatus) ? "Bergerak" : "Statis") : "Offline",
+      vin: "",
+      licenseNumber: String(d.licenseNumber ?? ""),
+      lng: s.lng != null ? parseFloat(String(s.lng)) : null,
+      lat: s.lat != null ? parseFloat(String(s.lat)) : null,
+      address: "",
+      gpsTime: gpsMs > 0 ? Math.floor(gpsMs / 1000) : null,
+      speed: Number(s.speed ?? 0),
+    };
+  });
+}
+
 // --- routes ---
 const app = new Elysia()
   .get("/api/health", () => ({ ok: true }))
@@ -98,6 +195,24 @@ const app = new Elysia()
       }
     }
     return { vehicles: out, accounts: accounts.length };
+  })
+  .post("/api/portal/vehicles", async ({ body }) => {
+    const { username, password } = (body ?? {}) as { username?: string; password?: string };
+    if (!username || !password) return { vehicles: [], accounts: 0 };
+    try {
+      const sess = await portalLogin(username, password);
+      const vehicles = await portalDevices(sess).catch(async (e: Error) => {
+        // token kedaluwarsa → login ulang sekali
+        if (/token|login|auth|expired/i.test(e.message)) {
+          portalCache.delete(username);
+          return portalDevices(await portalLogin(username, password));
+        }
+        throw e;
+      });
+      return { vehicles: vehicles.map((v) => ({ ...v, account: username })), accounts: 1 };
+    } catch (e) {
+      return { vehicles: [{ imei: `err:${username}`, name: `⚠ ${username} — ${(e as Error).message.slice(0, 80)}`, account: username, error: true }], accounts: 0 };
+    }
   })
   .post("/api/history", async ({ body }) => {
     const { appid, secret, imei, start, end } = (body ?? {}) as { appid?: string; secret?: string; imei?: string; start?: number; end?: number };
