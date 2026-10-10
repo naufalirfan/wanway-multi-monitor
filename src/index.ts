@@ -40,6 +40,30 @@ async function iopGet<T>(token: string, path: string, qs: Record<string, string 
 
 type Cred = { appid: string; secret: string; name?: string };
 
+// IOPGPS tidak mendokumentasikan nama field isi track/alarm — normalisasi defensif.
+const numOr = (...c: unknown[]): number | null => {
+  for (const v of c) {
+    const n = typeof v === "number" ? v : parseFloat(String(v));
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+};
+const normPoint = (p: Record<string, unknown>) => ({
+  lng: numOr(p.lng, p.lon, p.longitude),
+  lat: numOr(p.lat, p.latitude),
+  t: numOr(p.gpsTime, p.time, p.positionTime, p.ts, p.createTime),
+  speed: numOr(p.speed),
+  address: String(p.address ?? ""),
+});
+const normAlarm = (a: Record<string, unknown>) => ({
+  t: numOr(a.gpsTime, a.time, a.alarmTime, a.createTime, a.ts),
+  type: String(a.type ?? a.alarmType ?? a.alarmCode ?? ""),
+  content: String(a.content ?? a.desc ?? a.alarmContent ?? a.message ?? a.typeName ?? ""),
+  lng: numOr(a.lng, a.lon, a.longitude),
+  lat: numOr(a.lat, a.latitude),
+  address: String(a.address ?? ""),
+});
+
 // --- routes ---
 const app = new Elysia()
   .get("/api/health", () => ({ ok: true }))
@@ -74,6 +98,32 @@ const app = new Elysia()
       }
     }
     return { vehicles: out, accounts: accounts.length };
+  })
+  .post("/api/history", async ({ body }) => {
+    const { appid, secret, imei, start, end } = (body ?? {}) as { appid?: string; secret?: string; imei?: string; start?: number; end?: number };
+    if (!appid || !secret || !imei) return { points: [] };
+    try {
+      const token = await getToken(appid, secret);
+      const j = await iopGet<{ data?: Record<string, unknown>[] }>(token, "/api/device/track/history", {
+        imei, startTime: start ?? 0, endTime: end ?? Math.floor(Date.now() / 1000), coordType: "wgs84",
+      });
+      return { points: (j.data ?? []).map(normPoint).filter((p) => p.lat != null && p.lng != null) };
+    } catch (e) {
+      return { points: [], error: (e as Error).message.slice(0, 160) };
+    }
+  })
+  .post("/api/alarms", async ({ body }) => {
+    const { appid, secret, imei, start, end } = (body ?? {}) as { appid?: string; secret?: string; imei?: string; start?: number; end?: number };
+    if (!appid || !secret || !imei) return { alarms: [] };
+    try {
+      const token = await getToken(appid, secret);
+      const j = await iopGet<{ details?: Record<string, unknown>[]; data?: Record<string, unknown>[] }>(token, "/api/device/alarm", {
+        imei, startTime: start ?? 0, endTime: end ?? Math.floor(Date.now() / 1000),
+      });
+      return { alarms: (j.details ?? j.data ?? []).map(normAlarm) };
+    } catch (e) {
+      return { alarms: [], error: (e as Error).message.slice(0, 160) };
+    }
   })
 // Serve built Vite client (dist/client) — API + UI satu origin.
 // ponytail: cwd di Vercel = repo root, output di dist/client. Tambah path lain bila layout berubah.
